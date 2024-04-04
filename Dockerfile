@@ -1,7 +1,7 @@
 ARG MAKE_JOBS="1"
 ARG DEBIAN_FRONTEND="noninteractive"
 
-FROM python:3.8-slim AS base
+FROM python:3.8-slim-buster AS base
 FROM buildpack-deps:buster AS base-builder
 
 FROM base-builder AS mrtrix3-builder
@@ -51,25 +51,52 @@ FROM base-builder as freesurfer-installer
 WORKDIR /opt/freesurfer
 RUN curl -fsSLO https://raw.githubusercontent.com/freesurfer/freesurfer/v7.1.1/distribution/FreeSurferColorLUT.txt
 
-# Download minified FSL (6.0.4-2)
+# Download and install fsl
 FROM base-builder as fsl-installer
-WORKDIR /opt/fsl
-RUN curl -fsSL https://osf.io/dtep4/download \
-    | tar xz --strip-components 1
+
+RUN apt-get -qq update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install software-properties-common \
+       libopenblas-dev \
+       libboost-all-dev \
+    && apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/debian10/x86_64/3bf863cc.pub \
+    && add-apt-repository "deb https://developer.download.nvidia.com/compute/cuda/repos/debian10/x86_64/ /" \
+    && add-apt-repository contrib \
+    && apt-get -qq update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install cuda-11-4 \
+    && apt-get autoremove -y && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cd /tmp \
+    && curl -LO https://fsl.fmrib.ox.ac.uk/fsldownloads/fslinstaller.py \
+    && python3 fslinstaller.py -d /opt/fsl \
+    && mv /opt/fsl/lib/libtinfo.so /opt/fsl/lib/libtinfo.so.bak \
+    && mv /opt/fsl/lib/libtinfo.so.6 /opt/fsl/lib/libtinfo.so.6.bak
+
+# Patch for eddy-gpu
+ENV PATH=/usr/local/cuda/bin:${PATH}
+RUN cd /tmp \
+    && git clone https://github.com/dolchan/eddy-gpu \
+    && cd eddy-gpu \
+    && make \
+    && mv -f eddy-gpu /opt/fsl/bin/ \
+    && rm -rf /tmp/*
 
 # Build final image.
 FROM base AS final
 
 # Install runtime system dependencies.
 RUN apt-get -qq update \
-    && apt-get install -yq --no-install-recommends \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
         binutils \
         dc \
+        gnupg \
         less \
+        libboost-all-dev \
         libfftw3-3 \
         libgl1-mesa-glx \
         libgomp1 \
         liblapack3 \
+        libopenblas-dev \
         libpng16-16 \
         libqt5core5a \
         libqt5gui5 \
@@ -79,6 +106,13 @@ RUN apt-get -qq update \
         libquadmath0 \
         libtiff5 \
         python3-distutils \
+        software-properties-common \
+    && apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/debian10/x86_64/3bf863cc.pub \
+    && add-apt-repository "deb https://developer.download.nvidia.com/compute/cuda/repos/debian10/x86_64/ /" \
+    && add-apt-repository contrib \
+    && apt-get -qq update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -y install cuda-11-4 \
+    && apt-get autoremove -y && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=acpcdetect-installer /opt/art /opt/art
@@ -96,7 +130,7 @@ ENV ANTSPATH="/opt/ants/bin" \
     FSLTCLSH="/opt/fsl/bin/fsltclsh" \
     FSLWISH="/opt/fsl/bin/fslwish" \
     LD_LIBRARY_PATH="/opt/fsl/lib:$LD_LIBRARY_PATH" \
-    PATH="/opt/mrtrix3/bin:/opt/ants/bin:/opt/art/bin:/opt/fsl/bin:$PATH"
+    PATH="/opt/mrtrix3/bin:/opt/ants/bin:/opt/art/bin:/opt/fsl/bin:/usr/local/cuda/bin:$PATH"
 
 # Fix "Singularity container cannot load libQt5Core.so.5" on CentOS 7
 RUN strip --remove-section=.note.ABI-tag /usr/lib/x86_64-linux-gnu/libQt5Core.so.5 \
